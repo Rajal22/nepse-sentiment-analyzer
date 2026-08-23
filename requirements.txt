@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+pandas
+torch
+transformers
+openpyxl
+streamlit
+plotly
+requests
+pydantic

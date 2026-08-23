@@ -1,0 +1,31 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment / secrets
+.env
+
+# Large data files - don't push scraped datasets or model weights to GitHub
+dataset/
+*.csv
+*.xlsx
+*.xls
+nepse_mbert_final/
+nepse_mbert_final.zip
+nepse_mbert_results/
+nepse_mbert_combined_results/
+*.pkl
+*.safetensors
+*.bin
+
+# Checkpoints from long-running scrapes
+*checkpoint*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
