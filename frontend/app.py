@@ -63,6 +63,12 @@ def predict_new_text(text):
     resp = requests.post(f"{API_BASE}/predict", json={"text": text})
     return resp.json()
 
+def summarize_article(text, title=None):
+    resp = requests.post(f"{API_BASE}/summarize", json={"text": text, "title": title})
+    if resp.status_code == 200:
+        return resp.json()["summary"]
+    return "Could not generate summary."
+
 
 # ---------------------------------------------------------------------------
 # Check backend connectivity
@@ -244,6 +250,17 @@ st.divider()
 st.subheader("📰 Recent Articles")
 recent = fetch_articles(limit=20)
 if len(recent):
-    for _, row in recent.iterrows():
+    for idx, row in recent.iterrows():
         sentiment_emoji = {"positive": "🟢", "negative": "🔴", "neutral": "🟡"}.get(row["sentiment"], "")
-        st.markdown(f"{sentiment_emoji} **[{row['title']}]({row['url']})** — {row['date']} · {row['category']}")
+        col_a, col_b = st.columns([5, 1])
+        with col_a:
+            st.markdown(f"{sentiment_emoji} **[{row['title']}]({row['url']})** — {row['date']} · {row['category']}")
+        with col_b:
+            if st.button("Summarize", key=f"summarize_recent_{idx}"):
+                with st.spinner("Summarizing..."):
+                    summary = summarize_article(row.get("text", ""), row["title"])
+                st.info(summary)
+
+   
+    else:
+        st.info("No articles found matching that search.")

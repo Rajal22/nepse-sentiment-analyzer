@@ -1,45 +1,64 @@
 """
-NEPSE Sentiment Analyzer - FastAPI Backend
+NEPSE Sentiment Analyzer - FastAPI Backend (MongoDB-backed)
 
 Run with: uvicorn main:app --reload --port 8000
 Requires: nepse_mbert_final/ (your downloaded model folder) in the same directory,
-          sharesansar_mbert_predictions.csv, and the NEPSE index Excel file.
+          and a MONGODB_URI + GEMINI_API_KEY set in a .env file (or as real
+          environment variables when deployed).
 """
 
+import os
+import certifi
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import pandas as pd
 import torch
+import google.generativeai as genai
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from datetime import datetime
-import os
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 app = FastAPI(title="NEPSE Sentiment Analyzer API")
 
-# ---------------------------------------------------------------------------
-# Load model once at startup
-# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 MODEL_PATH = "nepse_mbert_final"
 ID2LABEL = {0: "negative", 1: "neutral", 2: "positive"}
+MONGODB_URI = os.getenv("MONGODB_URI")
+
+if not MONGODB_URI:
+    raise ValueError("MONGODB_URI not set - check your .env file or environment variables")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not set - check your .env file")
+
+genai.configure(api_key=GEMINI_API_KEY)
+gemini_model = genai.GenerativeModel("gemini-flash-lite-latest")
 
 tokenizer = None
 model = None
-
-# ---------------------------------------------------------------------------
-# Load precomputed data once at startup
-# ---------------------------------------------------------------------------
-ARTICLES_FILE = "dataset/sharesansar_mbert_predictions.csv"
-NEPSE_INDEX_FILE = "dataset/NEPSE-index-and-market-capitalization (1) (1).xlsx"
-
-articles_df = None
-daily_sentiment_df = None
-nepse_index_df = None
+mongo_client = None
+db = None
 
 
 @app.on_event("startup")
 def load_resources():
-    global tokenizer, model, articles_df, daily_sentiment_df, nepse_index_df
+    global tokenizer, model, mongo_client, db
+
+    print("Connecting to MongoDB...")
+    mongo_client = MongoClient(MONGODB_URI, tlsCAFile=certifi.where())
+    db = mongo_client["nepse_sentiment"]
+    print(f"Connected. Collections: {db.list_collection_names()}")
 
     print("Loading mBERT model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
@@ -47,43 +66,13 @@ def load_resources():
     model.eval()
     print("Model loaded.")
 
-    print("Loading articles and computing daily sentiment...")
-    articles_df = pd.read_csv(ARTICLES_FILE)
-    articles_df["date"] = pd.to_datetime(articles_df["date"], errors="coerce")
 
-    sentiment_map = {"positive": 1, "neutral": 0, "negative": -1}
-    articles_df["sentiment_score"] = articles_df["mbert_sentiment"].map(sentiment_map)
-
-    dated = articles_df.dropna(subset=["date"])
-    daily = dated.groupby(dated["date"].dt.date).agg(
-        avg_sentiment=("sentiment_score", "mean"),
-        article_count=("sentiment_score", "count"),
-        positive_count=("mbert_sentiment", lambda x: (x == "positive").sum()),
-        negative_count=("mbert_sentiment", lambda x: (x == "negative").sum()),
-        neutral_count=("mbert_sentiment", lambda x: (x == "neutral").sum()),
-    ).reset_index()
-    daily["date"] = pd.to_datetime(daily["date"])
-    daily = daily.sort_values("date").reset_index(drop=True)
-    daily["sentiment_7day_avg"] = daily["avg_sentiment"].rolling(window=7, min_periods=1).mean()
-    daily_sentiment_df = daily
-    print(f"Daily sentiment computed for {len(daily)} days.")
-
-    print("Loading NEPSE index data...")
-    if os.path.exists(NEPSE_INDEX_FILE):
-        nepse_raw = pd.read_excel(NEPSE_INDEX_FILE, sheet_name="NEPSE Index", header=1)
-        nepse_clean = nepse_raw[["Date/Month", "Nepse"]].copy()
-        nepse_clean.columns = ["date", "nepse_index"]
-        nepse_clean["date"] = pd.to_datetime(nepse_clean["date"], errors="coerce")
-        nepse_index_df = nepse_clean.dropna(subset=["date", "nepse_index"])
-        print(f"NEPSE index loaded: {len(nepse_index_df)} rows.")
-    else:
-        nepse_index_df = pd.DataFrame(columns=["date", "nepse_index"])
-        print("WARNING: NEPSE index file not found, overlay data will be empty.")
+@app.on_event("shutdown")
+def close_mongo():
+    if mongo_client:
+        mongo_client.close()
 
 
-# ---------------------------------------------------------------------------
-# Request/response models
-# ---------------------------------------------------------------------------
 class PredictRequest(BaseModel):
     text: str
     title: Optional[str] = None
@@ -94,9 +83,11 @@ class PredictResponse(BaseModel):
     confidence_scores: dict
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+class SummarizeRequest(BaseModel):
+    text: str
+    title: Optional[str] = None
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "NEPSE Sentiment Analyzer API"}
@@ -104,7 +95,6 @@ def root():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict_sentiment(req: PredictRequest):
-    """Predict sentiment for a new piece of text using fine-tuned mBERT."""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
 
@@ -119,31 +109,56 @@ def predict_sentiment(req: PredictRequest):
 
     return PredictResponse(sentiment=ID2LABEL[pred_id], confidence_scores=confidence_scores)
 
+@app.post("/summarize")
+def summarize_article(req: SummarizeRequest):
+    """Generate a short summary of an article using Gemini."""
+    prompt = f"""Summarize this NEPSE/financial news article in 2-3 concise sentences.
+Keep it factual and neutral. If the article is in Nepali, respond in English.
+
+Title: {req.title or ''}
+Article: {req.text[:3000]}
+
+Summary:"""
+
+    try:
+        response = gemini_model.generate_content(prompt)
+        return {"summary": response.text.strip()}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Summarization failed: {str(e)}")
+
 
 @app.get("/daily-sentiment")
 def get_daily_sentiment(start_date: Optional[str] = None, end_date: Optional[str] = None):
-    """Return the daily sentiment score time series, optionally filtered by date range."""
-    df = daily_sentiment_df.copy()
-    if start_date:
-        df = df[df["date"] >= pd.to_datetime(start_date)]
-    if end_date:
-        df = df[df["date"] <= pd.to_datetime(end_date)]
+    query = {}
+    if start_date or end_date:
+        date_filter = {}
+        if start_date:
+            date_filter["$gte"] = pd.to_datetime(start_date).to_pydatetime()
+        if end_date:
+            date_filter["$lte"] = pd.to_datetime(end_date).to_pydatetime()
+        query["date"] = date_filter
 
-    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-    return df.to_dict(orient="records")
+    docs = list(db.daily_sentiment.find(query, {"_id": 0}).sort("date", 1))
+    for d in docs:
+        d["date"] = d["date"].strftime("%Y-%m-%d")
+    return docs
 
 
 @app.get("/nepse-index")
 def get_nepse_index(start_date: Optional[str] = None, end_date: Optional[str] = None):
-    """Return the real NEPSE index time series, optionally filtered by date range."""
-    df = nepse_index_df.copy()
-    if start_date:
-        df = df[df["date"] >= pd.to_datetime(start_date)]
-    if end_date:
-        df = df[df["date"] <= pd.to_datetime(end_date)]
+    query = {}
+    if start_date or end_date:
+        date_filter = {}
+        if start_date:
+            date_filter["$gte"] = pd.to_datetime(start_date).to_pydatetime()
+        if end_date:
+            date_filter["$lte"] = pd.to_datetime(end_date).to_pydatetime()
+        query["date"] = date_filter
 
-    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
-    return df.to_dict(orient="records")
+    docs = list(db.nepse_index.find(query, {"_id": 0}).sort("date", 1))
+    for d in docs:
+        d["date"] = d["date"].strftime("%Y-%m-%d")
+    return docs
 
 
 @app.get("/articles")
@@ -153,49 +168,50 @@ def get_articles(
     stock_keyword: Optional[str] = None,
     limit: int = 50,
 ):
-    """
-    Return recent articles, optionally filtered by:
-    - date (YYYY-MM-DD)
-    - sentiment (positive/negative/neutral)
-    - stock_keyword (matches in title or text - powers 'stock-specific alerts')
-    """
-    df = articles_df.copy()
+    query = {}
 
     if date:
-        target_date = pd.to_datetime(date).date()
-        df = df[df["date"].dt.date == target_date]
+        target_date = pd.to_datetime(date)
+        next_day = target_date + pd.Timedelta(days=1)
+        query["date"] = {"$gte": target_date.to_pydatetime(), "$lt": next_day.to_pydatetime()}
+
     if sentiment:
-        df = df[df["mbert_sentiment"] == sentiment]
+        query["mbert_sentiment"] = sentiment
+
     if stock_keyword:
-        mask = (
-            df["title"].str.contains(stock_keyword, case=False, na=False)
-            | df["text"].str.contains(stock_keyword, case=False, na=False)
-        )
-        df = df[mask]
+        query["$text"] = {"$search": stock_keyword}
 
-    df = df.sort_values("date", ascending=False).head(limit)
-    result = df[["title", "url", "date", "category", "mbert_sentiment"]].copy()
-    result["date"] = result["date"].dt.strftime("%Y-%m-%d")
-    result = result.rename(columns={"mbert_sentiment": "sentiment"})
+    projection = {"_id": 0, "title": 1, "url": 1, "date": 1, "category": 1, "mbert_sentiment": 1, "text": 1}
+    docs = list(db.articles.find(query, projection).sort("date", -1).limit(limit))
 
-    return result.to_dict(orient="records")
+    for d in docs:
+        if d.get("date"):
+            d["date"] = d["date"].strftime("%Y-%m-%d")
+        d["sentiment"] = d.pop("mbert_sentiment", None)
+
+    return docs
 
 
 @app.get("/summary")
 def get_summary():
-    """Overall dataset summary stats for the dashboard header."""
-    total_articles = len(articles_df)
-    sentiment_counts = articles_df["mbert_sentiment"].value_counts().to_dict()
-    date_min = articles_df["date"].min()
-    date_max = articles_df["date"].max()
-    latest_sentiment = daily_sentiment_df.iloc[-1]["sentiment_7day_avg"] if len(daily_sentiment_df) else None
+    total_articles = db.articles.count_documents({})
+
+    pipeline = [{"$group": {"_id": "$mbert_sentiment", "count": {"$sum": 1}}}]
+    sentiment_counts = {doc["_id"]: doc["count"] for doc in db.articles.aggregate(pipeline)}
+
+    date_range = list(db.articles.aggregate([
+        {"$group": {"_id": None, "min_date": {"$min": "$date"}, "max_date": {"$max": "$date"}}}
+    ]))
+
+    latest_sentiment_doc = db.daily_sentiment.find_one(sort=[("date", -1)])
+    latest_sentiment = latest_sentiment_doc.get("sentiment_7day_avg") if latest_sentiment_doc else None
 
     return {
         "total_articles": total_articles,
         "sentiment_distribution": sentiment_counts,
         "date_range": {
-            "start": date_min.strftime("%Y-%m-%d") if pd.notna(date_min) else None,
-            "end": date_max.strftime("%Y-%m-%d") if pd.notna(date_max) else None,
+            "start": date_range[0]["min_date"].strftime("%Y-%m-%d") if date_range else None,
+            "end": date_range[0]["max_date"].strftime("%Y-%m-%d") if date_range else None,
         },
         "latest_7day_sentiment": round(latest_sentiment, 3) if latest_sentiment is not None else None,
     }
