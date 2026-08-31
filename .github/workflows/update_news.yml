@@ -1,0 +1,29 @@
+name: Update NEPSE News
+
+on:
+  schedule:
+    # runs every 4 hours (cron uses UTC time)
+    - cron: '0 */4 * * *'
+  workflow_dispatch:  # also allows manually triggering from the GitHub Actions tab
+
+jobs:
+  update-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 pymongo[srv] certifi google-generativeai
+
+      - name: Run update script
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python scripts/update_news.py
