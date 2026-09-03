@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests beautifulsoup4 pymongo[srv] certifi google-generativeai
+          pip install requests beautifulsoup4 pymongo[srv] certifi google-generativeai python-dotenv
 
 
 
