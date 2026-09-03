@@ -32,9 +32,14 @@ MAX_PAGES_PER_CATEGORY = 2  # only check the newest couple pages - we only want 
 
 CATEGORIES = ["nepse-news", "stock-market", "share-listed", "ipo-fpo-news", "mutual-fund", "featured"]
 
-MONGODB_URI = os.environ["MONGODB_URI"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+from dotenv import load_dotenv
+load_dotenv()
 
+MONGODB_URI = os.getenv("MONGODB_URI")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not MONGODB_URI or not GEMINI_API_KEY:
+    raise ValueError("MONGODB_URI or GEMINI_API_KEY not found - check your .env file")
 genai.configure(api_key=GEMINI_API_KEY)
 gemini_model = genai.GenerativeModel("gemini-flash-lite-latest")
 

@@ -2,9 +2,8 @@ name: Update NEPSE News
 
 on:
   schedule:
-    # runs every 4 hours (cron uses UTC time)
-    - cron: '0 */4 * * *'
-  workflow_dispatch:  # also allows manually triggering from the GitHub Actions tab
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   update-news:
@@ -21,6 +20,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install requests beautifulsoup4 pymongo[srv] certifi google-generativeai
+
+
+
+      - name: Debug secret length
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: |
+          echo "MONGODB_URI length: ${#MONGODB_URI}"
+          echo "First 15 chars: ${MONGODB_URI:0:15}"
 
       - name: Run update script
         env:
