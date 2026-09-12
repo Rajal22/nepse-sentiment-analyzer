@@ -126,6 +126,21 @@ def get_article_body(url):
     except requests.RequestException as e:
         print(f"  Error fetching {url}: {e}")
         return ""
+    
+def extract_nepse_index(text):
+    """Find a 'closed at X,XXX.XX' style mention of the NEPSE index in article text."""
+    if not text:
+        return None
+    match = re.search(r"clos(?:e|ed)\s+at\s+([\d,]+\.\d+)", text, re.IGNORECASE)
+    if match:
+        value_str = match.group(1).replace(",", "")
+        try:
+            value = float(value_str)
+            if 500 < value < 10000:
+                return value
+        except ValueError:
+            pass
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -239,14 +254,32 @@ def main():
             except ValueError:
                 a["date"] = None
 
-    if new_articles:
-        db.articles.insert_many(new_articles)
+
+
+
+        if new_articles:
+         db.articles.insert_many(new_articles)
         print(f"Inserted {len(new_articles)} new articles into MongoDB")
+
+        print("Extracting NEPSE index values from new articles...")
+        index_updates = 0
+        for article in new_articles:
+            if article.get("category") in ["nepse-news", "stock-market"] and article.get("date"):
+                value = extract_nepse_index(article.get("text", ""))
+                if value is not None:
+                    db.nepse_index.update_one(
+                        {"date": article["date"]},
+                        {"$set": {"date": article["date"], "nepse_index": value}},
+                        upsert=True,
+                    )
+                    index_updates += 1
+        print(f"Updated {index_updates} NEPSE index records")
 
     # recompute daily_sentiment from scratch (dataset is small enough this is cheap and always correct)
     print("Recomputing daily sentiment...")
     all_docs = list(db.articles.find({}, {"date": 1, "mbert_sentiment": 1}))
 
+   
     from collections import defaultdict
     daily_data = defaultdict(list)
     sentiment_map = {"positive": 1, "neutral": 0, "negative": -1}
